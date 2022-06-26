@@ -1,0 +1,285 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: later-execution
+
+Parameters:
+  ExecutionTableUserIndex:
+    Type: String
+    Default: UserIndex
+  AccessKeyTableUserIndex:
+    Type: String
+    Default: UserIndex
+  SiteDomainName:
+    Type: String
+  ApiDomainName:
+    Type: String
+  AuthDomainName:
+    Type: String
+  CognitoCertificate:
+    Type: String
+  Certificate:
+    Type: String
+
+Resources:
+  ExecutionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+        - AttributeName: UserId
+          AttributeType: S
+        - AttributeName: Created
+          AttributeType: N
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: !Ref ExecutionTableUserIndex
+          KeySchema:
+            - AttributeName: UserId
+              KeyType: HASH
+            - AttributeName: Created
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: Expired
+        Enabled: true
+
+  ExecutionTablePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:BatchGetItem
+              - dynamodb:Query
+              - dynamodb:DescribeTable
+              - dynamodb:PutItem
+              - dynamodb:BatchWriteItem
+              - dynamodb:DeleteItem
+            Resource:
+              - !GetAtt ExecutionTable.Arn
+              - !Sub
+                - "${TableARN}/index/*"
+                - { TableARN: !GetAtt ExecutionTable.Arn }
+
+  AccessKeyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+        - AttributeName: UserId
+          AttributeType: S
+        - AttributeName: Created
+          AttributeType: N
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: !Ref AccessKeyTableUserIndex
+          KeySchema:
+            - AttributeName: UserId
+              KeyType: HASH
+            - AttributeName: Created
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: Expired
+        Enabled: true
+
+  AccessKeyTablePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:BatchGetItem
+              - dynamodb:Query
+              - dynamodb:DescribeTable
+              - dynamodb:PutItem
+              - dynamodb:BatchWriteItem
+              - dynamodb:DeleteItem
+            Resource:
+              - !GetAtt AccessKeyTable.Arn
+              - !Sub
+                - "${TableARN}/index/*"
+                - { TableARN: !GetAtt AccessKeyTable.Arn }
+
+  AccessKeyTableReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:BatchGetItem
+              - dynamodb:Query
+              - dynamodb:DescribeTable
+            Resource:
+              - !GetAtt AccessKeyTable.Arn
+              - !Sub
+                - "${TableARN}/index/*"
+                - { TableARN: !GetAtt AccessKeyTable.Arn }
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UsernameAttributes:
+        - email
+      UsernameConfiguration:
+        CaseSensitive: False
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: False
+          RequireNumbers: False
+          RequireSymbols: False
+          RequireUppercase: False
+          TemporaryPasswordValidityDays: 7
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Priority: 1
+            Name: verified_email
+      AutoVerifiedAttributes:
+        - email
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      SupportedIdentityProviders:
+        - COGNITO
+      GenerateSecret: false
+      CallbackURLs:
+        - !Sub "https://${SiteDomainName}/callback"
+        - http://localhost:8080/callback
+      LogoutURLs:
+        - !Sub "https://${SiteDomainName}/"
+        - http://localhost:8080/
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - phone
+        - email
+        - openid
+        - profile
+        - aws.cognito.signin.user.admin
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      TokenValidityUnits:
+        IdToken: "hours"
+        AccessToken: "hours"
+        RefreshToken: "days"
+      IdTokenValidity: 1
+      AccessTokenValidity: 1
+      RefreshTokenValidity: 30
+
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !Ref AuthDomainName
+      CustomDomainConfig:
+        CertificateArn: !Ref CognitoCertificate
+
+  ApiAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambda/auth/
+      Handler: auth
+      Runtime: go1.x
+      Policies:
+        - !Ref AccessKeyTableReadOnlyPolicy
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          ACCESS_KEY_TABLE: !Ref AccessKeyTable
+
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - ApiKeyId
+          - ApiSignature
+        AllowMethods:
+          - OPTIONS
+          - GET
+          - POST
+          - PUT
+          - DELETE
+        AllowOrigins:
+          - '*'
+      Auth:
+        Authorizers:
+          OAuth2Authorizer:
+            IdentitySource: '$request.handler.Authorization'
+            JwtConfiguration:
+              audience:
+                - !Ref UserPoolClient
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+          LambdaAuthorizer:
+            FunctionArn: !Ref ApiAuthorizerFunction
+            AuthorizerPayloadFormatVersion: 2.0
+            Identity:
+              Headers:
+                - '$request.handler.ApiKeyId'
+        DefaultAuthorizer: OAuth2Authorizer
+
+  ApiDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !Ref ApiDomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref Certificate
+          SecurityPolicy: TLS_1_2
+          EndpointType: REGIONAL
+
+  ApiDomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      ApiId: !Ref Api
+      ApiMappingKey: v1
+      DomainName: !Ref ApiDomain
+      Stage: !Ref ApiApiGatewayDefaultStage
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambda/api/
+      Handler: api
+      Runtime: go1.x
+      Policies:
+        - !Ref ExecutionTablePolicy
+        - !Ref AccessKeyTablePolicy
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          EXECUTION_TABLE: !Ref ExecutionTable
+          ACCESS_KEY_TABLE: !Ref AccessKeyTable
+
+Outputs:
+  RegionalDomainName:
+    Value: !GetAtt ApiDomain.RegionalDomainName
